@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Bug Hunter: Tactical Grid</title>
+    <style>
+        body { 
+            background: #111; color: #eee; 
+            display: flex; flex-direction: column; 
+            align-items: center; justify-content: center; 
+            height: 100vh; margin: 0; font-family: monospace; 
+            user-select: none;
+        }
+        #game-wrapper {
+            background: #1a1a1a; padding: 20px; border-radius: 8px;
+            border: 2px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        canvas { 
+            background: #0a0a0a; 
+            border: 2px solid #555; 
+            cursor: crosshair; margin-bottom: 15px;
+        }
+        #ui-top { 
+            width: 480px; display: flex; justify-content: space-between;
+            font-size: 20px; font-weight: bold; margin-bottom: 15px;
+        }
+        #deckContainer {
+            display: flex; gap: 8px; justify-content: center; width: 480px;
+            min-height: 45px;
+        }
+        .card {
+            padding: 10px; width: 60px; text-align: center;
+            background: #2a2a2a; border: 2px solid #444; border-radius: 4px;
+            cursor: pointer; font-weight: bold; transition: 0.1s;
+        }
+        .card:hover { background: #3a3a3a; }
+        .card.active { border-color: #fff; background: #444; box-shadow: 0 0 10px rgba(255,255,255,0.3); }
+        .card.used { opacity: 0.2; cursor: not-allowed; border-color: #222; }
+        .card-move { color: #4facfe; }
+        .card-shoot { color: #ff5e62; }
+        .btn-end {
+            margin-top: 15px; padding: 12px; background: #9b59b6; color: #fff;
+            border: none; border-radius: 4px; cursor: pointer; font-weight: bold;
+            font-family: monospace; font-size: 16px; width: 100%;
+        }
+        .btn-end:hover { background: #8e44ad; }
+        #statusText { 
+            margin-top: 10px; color: #aaa; text-align: center; font-size: 14px; min-height: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-wrapper">
+        <div id="ui-top">
+            <span id="roundText" style="color: #9b59b6;">ROUND: 1</span>
+            <span id="scoreText" style="color: #f1c40f;">KILLS: 0</span>
+        </div>
+        
+        <!-- 8x8 Grid, 60px per tile -->
+        <canvas id="gameCanvas" width="480" height="480"></canvas>
+        
+        <div id="deckContainer"></div>
+        <div id="statusText">System Initializing...</div>
+        
+        <button class="btn-end" onclick="window.endRound()">END ROUND (Spawn Bugs)</button>
+    </div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    const COLS = 8;
+    const ROWS = 8;
+    const TILE_SIZE = 60;
+
+    let player = { x: 3, y: 3 };
+    let bugs = [];
+    let kills = 0;
+    let round = 1;
+
+    let deck = [
+        { type: 'move', used: false }, { type: 'move', used: false },
+        { type: 'move', used: false }, { type: 'move', used: false },
+        { type: 'move', used: false },
+        { type: 'shoot', used: false }, { type: 'shoot', used: false }
+    ];
+    let selectedSlotIndex = -1;
+    let hoverTile = { x: -1, y: -1 };
+    let laserAnim = null;
+
+    function getBugAt(x, y) {
+        for (let i = 0; i < bugs.length; i++) {
+            if (bugs[i].x === x && bugs[i].y === y) return bugs[i];
+        }
+        return null;
+    }
+
+    function spawnBugs(count) {
+        let spawned = 0;
+        let attempts = 0;
+        while(spawned < count && attempts < 200) {
+            let rx = Math.floor(Math.random() * COLS);
+            let ry = Math.floor(Math.random() * ROWS);
+            if (!getBugAt(rx, ry) && !(player.x === rx && player.y === ry)) {
+                bugs.push({ x: rx, y: ry });
+                spawned++;
+            }
+            attempts++;
+        }
+    }
+
+    spawnBugs(4);
+
+    // --- Validation Rules ---
+    function isValidMove(tx, ty) {
+        if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS) return false;
+        let dx = Math.abs(tx - player.x);
+        let dy = Math.abs(ty - player.y);
+        return (dx + dy === 1) && !getBugAt(tx, ty); // Exactly 1 cardinal step, must be empty
+    }
+
+    function isValidShoot(tx, ty) {
+        if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS) return false;
+        if (tx === player.x && ty === player.y) return false; // Can't shoot self
+        return (tx === player.x || ty === player.y); // Must be straight line
+    }
+
+    // --- Drawing ---
+    function drawRect(x, y, fillStyle, strokeStyle = null) {
+        if (fillStyle) {
+            ctx.fillStyle = fillStyle;
+            ctx.fillRect(x * TILE_SIZE + 4, y * TILE_SIZE + 4, TILE_SIZE - 8, TILE_SIZE - 8);
+        }
+        if (strokeStyle) {
+            ctx.strokeStyle = strokeStyle;
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x * TILE_SIZE + 4, y * TILE_SIZE + 4, TILE_SIZE - 8, TILE_SIZE - 8);
+        }
+    }
+
+    function renderUI() {
+        document.getElementById('scoreText').innerText = "KILLS: " + kills;
+        document.getElementById('roundText').innerText = "ROUND: " + round;
+        
+        let deckHtml = "";
+        for (let i = 0; i < deck.length; i++) {
+            let card = deck[i];
+            let cName = "card card-" + card.type;
+            if (card.used) cName += " used";
+            if (i === selectedSlotIndex) cName += " active";
+            let label = card.type === 'move' ? 'MOVE' : 'SHOOT';
+            deckHtml += '<div class="' + cName + '" onclick="window.selectCard(' + i + ')">' + label + '</div>';
+        }
+        document.getElementById('deckContainer').innerHTML = deckHtml;
+
+        let status = document.getElementById('statusText');
+        if (selectedSlotIndex === -1) {
+            status.innerText = "Click an ability card to begin.";
+        } else {
+            let type = deck[selectedSlotIndex].type;
+            status.innerText = type === 'move' ? "Select adjacent empty tile to MOVE." : "Select target along cardinal line to SHOOT.";
+        }
+    }
+
+    function render() {
+        // Clear background
+        ctx.fillStyle = "#0a0a0a";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw explicit grid squares
+        ctx.strokeStyle = "#222";
+        ctx.lineWidth = 2;
+        for (let x = 0; x < COLS; x++) {
+            for (let y = 0; y < ROWS; y++) {
+                ctx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            }
+        }
+
+        // Draw valid targets if card selected
+        if (selectedSlotIndex !== -1) {
+            let type = deck[selectedSlotIndex].type;
+            for (let x = 0; x < COLS; x++) {
+                for (let y = 0; y < ROWS; y++) {
+                    if (type === 'move' && isValidMove(x, y)) {
+                        drawRect(x, y, "rgba(79, 172, 254, 0.1)", "rgba(79, 172, 254, 0.5)");
+                    } else if (type === 'shoot' && isValidShoot(x, y)) {
+                        drawRect(x, y, "rgba(255, 94, 98, 0.1)");
+                    }
+                }
+            }
+        }
+
+        // Draw Bugs
+        for (let i = 0; i < bugs.length; i++) drawRect(bugs[i].x, bugs[i].y, "#f1c40f");
+
+        // Draw Player
+        drawRect(player.x, player.y, "#4facfe");
+
+        // Draw Hover & Laser
+        if (selectedSlotIndex !== -1 && hoverTile.x !== -1) {
+            let type = deck[selectedSlotIndex].type;
+            if (type === 'move' && isValidMove(hoverTile.x, hoverTile.y)) {
+                drawRect(hoverTile.x, hoverTile.y, null, "#4facfe");
+            } else if (type === 'shoot' && isValidShoot(hoverTile.x, hoverTile.y)) {
+                ctx.strokeStyle = "rgba(255, 94, 98, 0.5)";
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(player.x * TILE_SIZE + TILE_SIZE/2, player.y * TILE_SIZE + TILE_SIZE/2);
+                ctx.lineTo(hoverTile.x * TILE_SIZE + TILE_SIZE/2, hoverTile.y * TILE_SIZE + TILE_SIZE/2);
+                ctx.stroke();
+                drawRect(hoverTile.x, hoverTile.y, null, "#ff5e62");
+            }
+        }
+
+        if (laserAnim) {
+            ctx.strokeStyle = "#ff5e62";
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.moveTo(laserAnim.x1, laserAnim.y1);
+            ctx.lineTo(laserAnim.x2, laserAnim.y2);
+            ctx.stroke();
+            ctx.strokeStyle = "#fff";
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        renderUI();
+    }
+
+    // --- Global Actions ---
+    window.selectCard = function(index) {
+        if (deck[index].used) return;
+        selectedSlotIndex = (index === selectedSlotIndex) ? -1 : index;
+        render();
+    };
+
+    window.endRound = function() {
+        round++;
+        for (let i = 0; i < deck.length; i++) deck[i].used = false;
+        selectedSlotIndex = -1;
+        spawnBugs(3);
+        render();
+    };
+
+    // --- Inputs ---
+    canvas.addEventListener('mousemove', function(e) {
+        let rect = canvas.getBoundingClientRect();
+        hoverTile.x = Math.floor((e.clientX - rect.left) / TILE_SIZE);
+        hoverTile.y = Math.floor((e.clientY - rect.top) / TILE_SIZE);
+        render();
+    });
+
+    canvas.addEventListener('mouseleave', function() {
+        hoverTile = { x: -1, y: -1 };
+        render();
+    });
+
+    canvas.addEventListener('mousedown', function(e) {
+        if (selectedSlotIndex === -1) return;
+        
+        let rect = canvas.getBoundingClientRect();
+        let tx = Math.floor((e.clientX - rect.left) / TILE_SIZE);
+        let ty = Math.floor((e.clientY - rect.top) / TILE_SIZE);
+        let activeCard = deck[selectedSlotIndex];
+
+        if (activeCard.type === 'move' && isValidMove(tx, ty)) {
+            player.x = tx;
+            player.y = ty;
+            activeCard.used = true;
+            selectedSlotIndex = -1;
+            render();
+        } 
+        else if (activeCard.type === 'shoot' && isValidShoot(tx, ty)) {
+            // Find bugs on the line segment
+            let minX = Math.min(player.x, tx);
+            let maxX = Math.max(player.x, tx);
+            let minY = Math.min(player.y, ty);
+            let maxY = Math.max(player.y, ty);
+            
+            let hitCount = 0;
+            let survivingBugs = [];
+            for (let i = 0; i < bugs.length; i++) {
+                let b = bugs[i];
+                let isHit = false;
+                if (player.x === tx && b.x === player.x && b.y >= minY && b.y <= maxY) isHit = true;
+                if (player.y === ty && b.y === player.y && b.x >= minX && b.x <= maxX) isHit = true;
+                
+                if (isHit) hitCount++;
+                else survivingBugs.push(b);
+            }
+            
+            bugs = survivingBugs;
+            kills += hitCount;
+            activeCard.used = true;
+            selectedSlotIndex = -1;
+
+            laserAnim = {
+                x1: player.x * TILE_SIZE + TILE_SIZE/2, y1: player.y * TILE_SIZE + TILE_SIZE/2,
+                x2: tx * TILE_SIZE + TILE_SIZE/2, y2: ty * TILE_SIZE + TILE_SIZE/2
+            };
+            
+            render();
+            setTimeout(function() { laserAnim = null; render(); }, 150);
+        }
+    });
+
+    render();
+});
+</script>
+</body>
+</html>
